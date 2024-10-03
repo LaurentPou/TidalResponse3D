@@ -1,0 +1,479 @@
+load "msh3" 
+load "tetgen" 
+load "medit" 
+load "mmg3d-v4.0"
+load "iovtk" // for saving files
+
+load "UMFPACK64"
+load "gmsh"
+//load "MUMPS_FreeFem"
+
+load "Element_P3" // for more FE functions
+load "Element_P4"
+
+include "MeshSurface_edit.idp"
+include "3dSurfaces_edit.edp"
+include "Macros.edp"
+
+string OSsystem = "Windows"; // "Windows" or "Linux"
+
+/* Gravitational potential of a sphere inside it and in its near proximity
+ */
+// TODO : be able to calculate the tidal potential, and not have it as input
+// Note: extra comments have been removed (see them in AllBinaryEllipsoidNondim0.edp (modif 2017/11/21)
+
+real cpu=clock(); // get the clock in second
+//cout << " Number of processors = " << mpisize << endl;
+
+
+// Real physical parameters
+real radius0 = 6371000.; // Studying Earth under Moon tides
+
+real vol0 = (4./3.)*pi*radius0^3.;
+real density0 = 5520.;
+real mass0 = vol0*density0;
+
+
+//real E = 21e5, nu = 0.28, mu= E/(2*(1+nu));
+//real lambda = E*nu/((1+nu)*(1-2*nu));
+real mu = 0.115e12;
+real lambda = 0.115e12;
+//real nu = 2.3638e18; // currently not used
+real G = 6.67259e-11; // Gravitational constant
+real sqrt2=sqrt(2.);
+
+
+real mass20 = 7.342e22;
+//real mass20 = vol11*density0;
+
+real distance = 384399000.;
+
+
+
+// Nondimensionalize
+
+real refradius = radius0;
+real refmass = mass0;
+real refdensity = refmass/(refradius^3.); //density;
+real reftime = 29.53*24*3600.;//sqrt((refradius^3.)/(4*pi*G*mass0)); //29.53*24.*3600.;
+real refpressure = refmass/((reftime^2.)*refradius); // lambda
+real refstress = refpressure;
+real refpotential = (refradius^2.)/(reftime^2.);//refpressure/refdensity;
+real coeff = 4*pi*G*refmass*(reftime^2.)/(refradius^3.); //4*pi*G*(refdensity)*(refradius^2.)/(refpotential);
+
+real lambda1 = lambda/refpressure;
+real mu1 = mu/refpressure;
+
+
+
+// Nondimensional problem
+real d = distance/refradius; // Distance between bodies;
+real Rout = 20.*d;
+real dividefactor = 1.; // For refining meshes (umfpack crash for 4, max for JPL laptop is 2)
+
+cout << " Refining factor = " << dividefactor << endl;
+
+real hs1 = 0.2/(2.*dividefactor);  // mesh size on sphere1
+real hs2 = 0.2/(2.*dividefactor);
+real hsOut = Rout/(5.*dividefactor);
+real R1 = 1.;// Studied; 
+real R2 = 1; // Tide generator
+
+real Rseed = hs1/5.; //hsSeed/2.;//(0.02/(dividefactor));// Divergent for RSeed < 0.02
+real hsSeed = hs1*hs1/R1;  //hs1;//(0.005/(dividefactor));// Divergent for hsSeed < 0.004 (if RSeed = 0.02)
+
+
+
+// Sphere creation
+meshS ThS = Sphere(R1,hs1,100,1.0); // "gluing" surface meshs to tolat boundary meshes
+meshS ThSseed = Sphere(Rseed,hsSeed,150,1.0); // For pressure initialisation
+meshS ThS2 = Sphere(R2,hs2,200,1.0);
+meshS ThSout = Sphere(Rout,hsOut,400,1.0);
+
+// Sphere translation
+func XX1 = 1.2*x;// - d;
+func XX2 = x + d;
+func YY = y;
+func ZZ = z;
+
+meshS ThSmoved = movemeshS(ThS,transfo=[XX1,YY,ZZ]);
+meshS ThSseedMoved = movemeshS(ThSseed,transfo=[XX1,YY,ZZ]);
+meshS ThS2moved = movemeshS(ThS2,transfo=[XX2,YY,ZZ]);
+
+meshS ThSInMoved = ThSmoved+ThSseedMoved;
+meshS ThSall = ThSmoved+ThSseedMoved+ThS2moved+ThSout;
+plot (ThSall,wait=true);
+
+// Model parameters
+real vol1 = (4./3.)*pi*R1^3.;
+real density1 = density0/refdensity;
+real mass1 = vol1*density1;
+real potBoundary1 = -((G*refmass*reftime^2.)/(refradius^3.0))*(mass1/R1);
+real potBoundary1Inf = -((G*refmass*reftime^2.)/(refradius^3.0))*(mass1/Rout);
+
+
+real vol2 = (4./3.)*pi*R2^3.;
+real mass2 = mass20/refmass;
+real density2 = mass2/vol2;
+real potBoundary2 = -((G*refmass*reftime^2.)/(refradius^3.0))*(mass2/R2);
+
+func d2center = sqrt((x-d)^2. + y^2. + z^2.);
+func d1center = sqrt(x^2. + y^2. + z^2.);
+real potBoundary2Inf = -((G*refmass*reftime^2.)/(refradius^3.0))*(mass2/d2center);
+
+
+//func rho = density;
+func rho1 = ((region == 1)*density1) + ((region == 10)*density1);
+func rho2 = ((region == 2)*density2);
+func rhoAll = rho1 + rho2;
+
+
+// 3d meshing
+real voltet1=(hs1^3)/6.;
+real voltet2=(hs2^3)/6.;
+real voltetOut=(hsOut^3)/6.;
+real voltetSeed=(hsSeed^3)/6.;
+real[int] domaine = [d,0.,0.,2,voltet2,d+2.*R2,0.,0.,3,voltetOut];
+real[int] domaineNoSeed = [0.+2.*Rseed,0.,0.,1,voltet1];
+real[int] domaineSeed = [0,0.,0.,10,voltetSeed];
+real[int] hole = [0.,0.,0.,0.+2.*Rseed,0.,0.];
+real[int] holeNoSeed = [0.,0.,0.];
+// for each region, 5 parameters: x coord, y coord, z coord of a point in the region +
+// attribute (i.e. label)  and maximum volume for tetrahedra for this region
+
+
+// Only studied body
+mesh3 ThNoSeed = tetg(ThSInMoved,switch="pqaAAYYQ",nbofholes=1,holelist=holeNoSeed,nbofregions=1,regionlist=domaineNoSeed);
+
+mesh3 ThSeed = tetg(ThSseedMoved,switch="pqaAAYYQ",nbofregions=1,regionlist=domaineSeed);
+mesh3 ThIn = ThSeed + ThNoSeed;
+
+//medit("Ball",ThNoSeed);
+//medit("Ball",ThIn);
+//plot (Th,wait=true);
+
+
+// Whole universe
+mesh3 ThAnte = tetg(ThSall,switch="pqaAAYYQ",nbofholes=2,holelist=hole,nbofregions=2,regionlist=domaine); // fill surfacic mesh
+mesh3 Th = ThAnte + ThIn;
+//medit("BigBall",Th);
+
+
+
+fespace Vh(Th,P1); // FE space P1 associated to mesh Th
+// P1 is nodes, P0 is center of triangle, P2 is nodes and center of sides
+fespace VhIn(ThIn,P1);
+fespace VhAnte(ThAnte,P1);
+Vh phiPert,vPert,phi0All,vAll;
+VhIn phi0,v,p0,v0,px,vpx,py,vpy,pz,vpz;
+VhAnte phi0Ante;
+
+macro Grad(u)  [dx(u),dy(u),dz(u)] // EOM
+macro div(u,v,w)  ( dx(u)+dy(v)+dz(w) ) // EOM
+  
+
+// Reference model equations
+// First, the gravitational equilibrium
+
+
+problem poissonIn(phi0All,vAll)=
+  int3d(Th)(Grad(phi0All)'*Grad(vAll))
+  +int3d(Th)(coeff*rho1*vAll)
+  +on(400,phi0All=-((G*refmass*reftime^2.)/(refradius^3.0))*(mass1/d1center)); 
+  //+on(100,phi0All=-((G*refmass*reftime^2.)/(refradius^3.0))*(mass1/d1center)); // This CL seems necessary !! /!\ bad !!
+																				// 2022 09 27: doesnt seem to be the case anymore
+
+
+poissonIn;
+
+phi0 = phi0All*(region==1)+phi0All*(region==10);
+
+/*  
+// Analytic solution
+phi0Ante = -((G*refmass*reftime^2.)/(refradius^3.0))*(mass1/d1center);
+phi0 = -((G*refmass*reftime^2.)/(refradius^3.0))*mass1*((3*R1^2-d1center^2)/(2*R1^3)); // Analytic formula for homogeneous body
+phi0All = phi0*(region==1)+phi0*(region==10) + phi0Ante*(region==3);
+*/
+
+
+Vh gxAll = -dx(phi0All);
+Vh gyAll = -dy(phi0All);
+Vh gzAll = -dz(phi0All);
+Vh gMag = sqrt(gxAll^2. + gyAll^2. + gzAll^2.); 
+
+VhIn gx = -dx(phi0);
+VhIn gy = -dy(phi0);
+VhIn gz = -dz(phi0);
+
+// Then, the mechanical equilibrium
+/*
+problem lameIn(p0,v0)=
+  //int3d(ThIn)(dx(p)*v2+dy(p)*v2+dz(p)*v2)
+  int3d(ThIn)(Grad(p0)'*[v0,v0,v0])
+  +int3d(ThIn)(rho1*(Grad(phi0)'*[v0,v0,v0]))
+  +on(100,p0=0);
+
+
+lameIn;
+*/
+
+p0 = ((G*refmass*reftime^2.)/(refradius^3.0))*density1*mass1*(R1^2-d1center^2)/(2*R1^3);
+//p1 = 1./3.*(px+py+pz);
+
+VhIn gradpx = dx(p0);
+VhIn gradpy = dy(p0);
+VhIn gradpz = dz(p0);
+VhIn lapP1 = dx(gradpx)+dy(gradpy)+dz(gradpz);
+VhIn gradpxx = dx(gradpx);
+VhIn gradpyy = dy(gradpy);
+VhIn gradpzz = dz(gradpz);
+VhIn gradpxy = dx(gradpy);
+VhIn gradpxz = dx(gradpz);
+VhIn gradpyz = dy(gradpz);
+
+
+
+// Spherical equations
+/* This is a coupled problem in which the main unknown is the
+displacement u.
+Three equations: mass conservation, impulse equation, Poisson equation */
+fespace VhNoSeed(ThNoSeed,P1);
+VhNoSeed ux,uy,uz,phi1,vx,vy,vz,vphi;
+
+
+// First, the perturbating tidal potential:
+
+// Total perturbating potential phiPert:
+/*
+problem poissonPert(phiPert,vPert)=
+  int3d(Th)(Grad(phiPert)'*Grad(vPert))
+  +int3d(Th)(coeff*rho2*vPert)
+  //+on(400,phiPert=potBoundary2Inf); // TBM ; can't use CL only on surface
+  +on(400,phiPert=potBoundary2Inf);
+
+poissonPert;
+
+
+//Vh gxPert = -dx(phiPert);
+//Vh gyPert = -dy(phiPert);
+//Vh gzPert = -dz(phiPert);
+
+// We now subtract the main component (direct attraction) so that only the tidal potential (2nd order) is left
+
+VhNoSeed phiPertCore = (region == 1)*phiPert;
+
+
+fespace VhSeed(ThSeed,P1);
+VhSeed phiPertSeed = (region == 10)*phiPert;
+
+
+real tot = 0;
+real sup = VhNoSeed.ndof; // Nb of Nodes
+*/
+VhNoSeed VPertCore,Vtest;
+real meanPhiPertSeed = -((G*refmass*reftime^2.)/(refradius^3.0))*(mass2/d);//mean(phiPertSeed);
+
+//cout << "Mean of phiPertCore (f. mean): " << mean(phiPertCore) << endl;
+//cout << "Mean of phiPertSeed (f. mean): " << mean(phiPertSeed) << endl;
+
+
+// Note that meanPhiPertSeed is negative
+problem tidalPot(VPertCore,Vtest)=
+  int3d(ThNoSeed)(VPertCore*Vtest)
+  //-int3d(ThNoSeed)(meanPhiPertSeed*((d1center^2.)/(d^2.))*(1./2.)*(3*(((sin(acos(z/d1center)))^2)*((cos(atan2(y,x)))^2))-1)*Vtest);
+  -int3d(ThNoSeed)(meanPhiPertSeed*(1./4.)*((d1center^2.)/(d^2.))*(3*(((sin(acos(z/d1center)))^2)*((cos(2*atan2(y,x))))))*Vtest); // Acc to Greff Lefftz
+  //-int3d(ThNoSeed)(meanPhiPertSeed*((d1center^2.)/(d^2.))*(3*(((sin(acos(z/d1center)))^2)*((cos(atan2(y,x)))^2))-1)*Vtest);
+  
+tidalPot;
+
+
+// Now, the real problem
+macro epsilon(u,v,w)  [dx(u),dy(v),dz(w),
+		       (dy(u)+dx(v))/sqrt2,(dz(u)+dx(w))/sqrt2,
+		       (dz(v)+dy(w))/sqrt2] // for double dot product
+
+
+//problem all([ux,uy,uz,phi1],[vx,vy,vz,vphi],precon=precondi)=
+problem all([ux,uy,uz,phi1],[vx,vy,vz,vphi])=
+  //First, the Poisson equation
+  int3d(ThNoSeed)(Grad(phi1)'*Grad(vphi))
+  //-int3d(ThNoSeed)(coeff*rho1*div(ux,uy,uz)*vphi)
+  //Now, the impulse equation
+  //-int3d(ThNoSeed)((lambda*div(ux,uy,uz)*div(vx,vy,vz)
+		      //+2.*mu*(epsilon(ux,uy,uz)'*epsilon(vx,vy,vz)))/refstress)
+  //-int3d(ThNoSeed)(lambda1*div(ux,uy,uz)*div(vx,vy,vz)
+  //		   +2.*mu1*(epsilon(ux,uy,uz)'*epsilon(vx,vy,vz)))
+  -int3d(ThNoSeed)(2.*mu1*(epsilon(ux,uy,uz)'*epsilon(vx,vy,vz)))
+  
+  //+int3d(ThNoSeed)(lapP1*[ux,uy,uz]'*[vx,vy,vz]) // before: - sign
+  +int3d(ThNoSeed)([ux*gradpxx+uy*gradpxy+uz*gradpxz,
+  		    ux*gradpxy+uy*gradpyy+uz*gradpyz,
+  		    ux*gradpxz+uy*gradpyz+uz*gradpzz]'*[vx,vy,vz])
+  //+int3d(ThNoSeed)([ux*gradpxx+ux*gradpxy+ux*gradpxz,
+  //		    uy*gradpxy+uy*gradpyy+uy*gradpyz,
+  //		    uz*gradpxz+uz*gradpyz+uz*gradpzz]'*[vx,vy,vz])
+  
+  +int3d(ThNoSeed)([gradpx*dx(ux)+gradpy*dy(ux)+gradpz*dz(ux),
+  		    gradpx*dx(uy)+gradpy*dy(uy)+gradpz*dz(uy),
+  		    gradpx*dx(uz)+gradpy*dy(uz)+gradpz*dz(uz)]'*[vx,vy,vz]) // before: - sign
+  //+int3d(ThNoSeed)([gradpx*dx(ux)+gradpy*dx(uy)+gradpz*dx(uz),
+  //		    gradpx*dy(ux)+gradpy*dy(uy)+gradpz*dy(uz),
+  //		    gradpx*dz(ux)+gradpy*dz(uy)+gradpz*dz(uz)]'*[vx,vy,vz])
+
+
+  //+int3d(ThNoSeed)(rho1*div(ux,uy,uz)*(Grad(phi0)'*[vx,vy,vz]))
+  -int3d(ThNoSeed)(rho1*(Grad(phi1)'*[vx,vy,vz]))
+  -int3d(ThNoSeed)(rho1*(Grad(VPertCore)'*[vx,vy,vz]))
+  //+int2d(ThNoSeed,150)((dx(ux)+0.5*(dx(uy)+dy(ux))+0.5*(dx(uz)+dz(ux)))*vx)
+  //+int2d(ThNoSeed,150)((dy(uy)+0.5*(dx(uy)+dy(ux))+0.5*(dy(uz)+dz(uy)))*vy)
+  //+int2d(ThNoSeed,150)((dz(uz)+0.5*(dx(uz)+dz(ux))+0.5*(dy(uz)+dz(uy)))*vz)
+  // Poisson CL (TBM)
+  //+on(150,phi1=0.)
+  // Impulse CL
+  +on(150,ux=0.,uy=0.,uz=0.);
+
+
+
+// Let's go
+all;
+
+
+// Redimensionalization
+ux = ux*refradius;
+uy = uy*refradius;
+uz = uz*refradius;
+phi1 = phi1*refpotential;
+phi0 = phi0*refpotential;
+phiPert = phiPert*refpotential;
+p0 = p0*refpressure;
+VPertCore = VPertCore*refpotential;
+
+gx = gx*refpotential/refradius;
+gy = gy*refpotential/refradius;
+gz = gz*refpotential/refradius;
+
+gMag = gMag*refpotential/refradius;
+
+/*
+VhNoSeed gphi1x, gphi1y, gphi1z;
+gphi1x = -(1./refradius)*dx(phi1);
+gphi1y = -(1./refradius)*dy(phi1);
+gphi1z = -(1./refradius)*dz(phi1);
+*/
+
+// Conversion into spherical coordinates
+VhNoSeed urMag = sqrt(ux^2.+uy^2.+uz^2.);
+VhNoSeed theta = acos(z/(sqrt(x^2+y^2+z^2)));
+VhNoSeed phi = atan2(y,x);
+VhNoSeed ur = ux*sin(theta)*cos(phi) + uy*sin(theta)*sin(phi) + uz*cos(theta);
+//VhNoSeed ur;
+
+// Convention: r, theta, phi with theta  inclinaison (or colatitude)
+// Base : U, South, East (right handed)
+VhIn grIn = gx*sin(theta)*cos(phi) + gy*sin(theta)*sin(phi) + gz*cos(theta);
+VhIn gthetaIn = gx*cos(theta)*cos(phi) + gy*cos(theta)*sin(phi) + gz*(-sin(theta));
+VhIn gphiIn = gx*(-sin(phi)) + gy*cos(phi);
+
+
+// Calculating a posteriori Love number
+real g0;
+g0 = G*refmass/(refradius^2);
+VhNoSeed h;
+h = ux*g0/VPertCore;
+
+
+// Save results
+string MasterName = "SemiAnalyticEarthMoon";
+string PRes = "_P2res";
+
+string name = "PotIn" + MasterName + PRes;
+string name1 = "gIn" + MasterName + PRes;
+string name2 = "PressIn" + MasterName + PRes;
+string name21 = "PressInGradX" + MasterName + PRes;
+string name22 = "PressInGradY" + MasterName + PRes;
+string name23 = "PressInGradZ" + MasterName + PRes;
+string name3 = "PotPert" + MasterName + PRes;
+string name33 = "gPert" + MasterName + PRes;
+string name333 = "VPert" + MasterName + PRes;
+string name4 = "Disp" + MasterName + PRes;
+string name44 = "DispRadialMag" + MasterName + PRes;
+string name444 = "DispRadial" + MasterName + PRes;
+string name5 = "Pot1" + MasterName + PRes;
+string name55 = "Rho1" + MasterName + PRes;
+string name555 = "GradPot1" + MasterName + PRes;
+string name6 = "hLoveNumber" + MasterName + PRes;
+string name7 = "gSphericalIn" + MasterName + PRes;
+string name77 = "PotAll" + MasterName + PRes;
+string name777 = "gMagAll" + MasterName + PRes;
+
+string name01 = "1" + MasterName + PRes;
+string name02 = "2" + MasterName + PRes;
+string name03 = "3" + MasterName + PRes;
+string name04 = "4" + MasterName + PRes;
+string name05 = "5" + MasterName + PRes;
+string name06 = "6" + MasterName + PRes;
+
+int nbOrder = 1;
+int[int] fforder2=[nbOrder];
+
+/*
+string Separator = "/"; //"\\"; // For Windows, should be "\\"; For Linux, should be "/"
+string ParaviewPath = "." + Separator + "Paraview" + Separator; */
+
+string ParaviewPath = "./Paraview/";
+string Extension = ".vtk"; //".vtu";
+
+savevtk(ParaviewPath+name+nbOrder+Extension,ThIn,phi0,order=fforder2,dataname="PotentialIn",bin=true);
+//savevtk(ParaviewPath+name1+nbOrder+Extension,ThIn,[gx,gy,gz],order=fforder2,dataname="gIn",bin=true);
+savevtk(ParaviewPath+name2+nbOrder+Extension,ThIn,p0,order=fforder2,dataname="PressureIn",bin=true);
+savevtk(ParaviewPath+name21+nbOrder+Extension,ThIn,gradpx,order=fforder2,dataname="PressureIn",bin=true);
+savevtk(ParaviewPath+name22+nbOrder+Extension,ThIn,gradpy,order=fforder2,dataname="PressureIn",bin=true);
+savevtk(ParaviewPath+name23+nbOrder+Extension,ThIn,gradpz,order=fforder2,dataname="PressureIn",bin=true);
+//savevtk(ParaviewPath+name3+nbOrder+Extension,Th,phiPert,order=fforder2,dataname="PotentialPert",bin=true);
+//savevtk(ParaviewPath+name33+nbOrder+Extension,Th,[gxPert,gyPert,gzPert],order=fforder2,dataname="g",bin=true);
+//savevtk(ParaviewPath+name333+nbOrder+Extension,ThNoSeed,VPertCore,order=fforder2,dataname="VNoSeed",bin=true);
+savevtk(ParaviewPath+name4+nbOrder+Extension,ThNoSeed,[ux,uy,uz],order=fforder2,dataname="Displacement",bin=true);
+savevtk(ParaviewPath+name44+nbOrder+Extension,ThNoSeed,urMag,order=fforder2,dataname="Ur",bin=true);
+savevtk(ParaviewPath+name444+nbOrder+Extension,ThNoSeed,ur,order=fforder2,dataname="Ur",bin=true);
+savevtk(ParaviewPath+name5+nbOrder+Extension,ThNoSeed,phi1,order=fforder2,dataname="PotentialChanges",bin=true);
+savevtk(ParaviewPath+name55+nbOrder+Extension,ThNoSeed,-refdensity*rho1*div(ux,uy,uz),order=fforder2,dataname="DensityChanges",bin=true);
+//savevtk("../Paraview/"+name555+nbOrder+Extension,ThNoSeed,[gphi1x,gphi1y,gphi1z],order=fforder2,dataname="PotentialChanges",bin=true);
+
+savevtk(ParaviewPath+name6+nbOrder+Extension,ThNoSeed,h,order=fforder2,dataname="h",bin=true);
+
+savevtk(ParaviewPath+name7+nbOrder+Extension,ThIn,[grIn,gthetaIn,gphiIn],order=fforder2,dataname="gIn",bin=true);
+savevtk(ParaviewPath+name77+nbOrder+Extension,Th,phi0All,order=fforder2,dataname="phi0",bin=true);
+savevtk(ParaviewPath+name777+nbOrder+Extension,Th,gMag,order=fforder2,dataname="gMag",bin=true);
+
+/*
+savevtk(ParaviewPath+name01+nbOrder+Extension,ThNoSeed,lambda1*div(ux,uy,uz),order=fforder2,dataname="PotentialIn",bin=true);
+savevtk(ParaviewPath+name02+nbOrder+Extension,ThNoSeed,lapP1*[ux,uy,uz],order=fforder2,dataname="PotentialIn",bin=true);
+savevtk(ParaviewPath+name03+nbOrder+Extension,ThNoSeed,[gradpx*dx(ux)+gradpy*dy(ux)+gradpz*dz(ux),gradpx*dx(uy)+gradpy*dy(uy)+gradpz*dz(uy),gradpx*dx(uz)+gradpy*dy(uz)+gradpz*dz(uz)],order=fforder2,dataname="PotentialIn",bin=true);
+savevtk(ParaviewPath+name04+nbOrder+Extension,ThNoSeed,rho1*div(ux,uy,uz)*(Grad(phi0)),order=fforder2,dataname="PotentialIn",bin=true);
+savevtk(ParaviewPath+name05+nbOrder+Extension,ThNoSeed,rho1*(Grad(phi1)),order=fforder2,dataname="PotentialIn",bin=true);
+savevtk(ParaviewPath+name06+nbOrder+Extension,ThNoSeed,rho1*(Grad(VPertCore)),order=fforder2,dataname="PotentialIn",bin=true);
+*/
+
+cout << " density1 = " << density1*refdensity << endl;
+cout << " density2 = " << density2*refdensity << endl;
+cout << " Boundary condition at infinity: " << potBoundary1Inf*refpotential << endl;
+cout << " Boundary condition at surface: " << potBoundary1*refpotential << endl;
+cout << " Aa = " << coeff << endl;
+cout << " Vo = " << meanPhiPertSeed*refpotential << endl;
+cout << " Lr = " << refradius << endl;
+cout << " Mr = " << refmass << endl;
+cout << " Tr = " << reftime << endl;
+cout << " Phir = " << refpotential << endl;
+cout << " Surface gravity (th) = " << g0 << endl;
+cout << " Nondimensional lambda = " << lambda1 << endl;
+cout << " Pressure reference = " << refpressure << endl;
+
+//cout << " Boundary condition : " << potBoundaryExt << endl;
+
+//cout << " External sphere radius : " << Rout << endl;
+//cout << " Internal sphere radius: " << R1  << endl;
+
+cout << " Path for saved files : " << ParaviewPath << endl;
+
+cout << " CPU time = " << clock()-cpu << endl;
+

@@ -1,0 +1,33 @@
+
+
+
+macro gradvect2d(u,v)  [[dx(u),dy(u)],
+		       [dx(u),dy(u)]] //
+  
+macro gradvect3d(u,v,w)  [[dx(u),dy(u),dz(u)],
+			 [dx(v),dy(v),dz(v)],
+			 [dx(w),dy(w),dz(w)]] // EOM
+
+
+macro metricTensor2d(u,v)  (0.5*( gradvect2d(u,v)'+gradvect2d(u,v) )) // EOM
+macro metricTensor3d(u,v,w)  (0.5*( gradvect3d(u,v,w)'+gradvect3d(u,v,w) )) // EOM
+
+/*macro metricTensor2d(u,v) (0.5*([[dx(u),dy(u)],[dx(u),dy(u)]] +
+			    [[dx(u),dy(u)],[dx(u),dy(u)]]')) // EOM
+*/
+
+macro div2d(u,v)  ( dx(u)+dy(v) ) // EOM
+macro div3d(u,v,w)  ( dx(u)+dy(v)+dz(w) ) // EOM
+
+macro gradscal3d(u)  [dx(u),dy(u),dz(u)]  // EOM
+macro gradscal2d(u)  [dx(u),dy(u)] // EOM
+
+macro doubledot(mata,matb)  ((trace(mata*matb'))) // EOM
+
+/* Definition d'arrays
+d = (a ? b : c);
+d[i] prend la valeur de b[i]= si a[i]=true, et prend la valeur de c[i]= sinon
+ */
+
+
+
